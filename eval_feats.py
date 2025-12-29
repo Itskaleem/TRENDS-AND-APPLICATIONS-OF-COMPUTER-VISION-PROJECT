@@ -1,51 +1,76 @@
+from __future__ import annotations
+
+import argparse
 import json
+from pathlib import Path
+from typing import Iterable
+
 import numpy as np
-from sklearn.svm import LinearSVC
 from sklearn.model_selection import cross_val_score
-from os.path import join, splitext
-from sys import argv
+from sklearn.svm import LinearSVC
 
-def eval_svm(data_path, svm_iters=100000, svm_conf=1e-3, crossval_k=10):
 
-    feats, labels = [], []
-
-    with open(data_path) as f:
-        annots = json.load(f)
+def _load_features(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    feats: list[list[float]] = []
+    labels: list[int] = []
+    with path.open() as handle:
+        annots = json.load(handle)
 
     for annot in annots:
-        
-        # sometimes this happens with Wang, just skip this sample
-        feat = np.asarray(annot['feat'])
+        feat = np.asarray(annot["feat"], dtype=np.float32)
         if np.any(np.isnan(feat)):
             continue
-        feats.append(annot['feat'])
-        labels.append(annot['label'])
+        feats.append(annot["feat"])
+        labels.append(annot["label"])
 
-    feats = np.asarray(feats, dtype=np.float32)
+    features = np.asarray(feats, dtype=np.float32)
+    labels_arr = np.asarray(labels, dtype=np.float32)
+    return features, labels_arr
 
-    # normalize features
-    mean,std = np.mean(feats,axis=0), np.std(feats,axis=0)
-    feats = (feats - mean) / (std + 1e-6)
 
-    labels = np.asarray(labels, dtype=np.float32)
-    # apply svm and return results
+def _normalize_features(features: np.ndarray) -> np.ndarray:
+    mean = np.mean(features, axis=0)
+    std = np.std(features, axis=0)
+    return (features - mean) / (std + 1e-6)
+
+
+def eval_svm(
+    data_path: Path,
+    svm_iters: int = 100000,
+    svm_conf: float = 1e-3,
+    crossval_k: int = 10,
+) -> Iterable[float]:
+    """Evaluate features with a LinearSVM classifier."""
+    feats, labels = _load_features(data_path)
+    feats = _normalize_features(feats)
     clf = LinearSVC(max_iter=svm_iters, tol=svm_conf)
-    scores = cross_val_score(clf, feats, labels, cv=crossval_k)
+    return cross_val_score(clf, feats, labels, cv=crossval_k)
 
-    return scores
 
-if __name__ == '__main__':
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate features with a Linear SVM.")
+    parser.add_argument("features", type=Path, help="Path to feature json file.")
+    parser.add_argument("--svm-iters", type=int, default=100000, help="Max SVM iterations.")
+    parser.add_argument("--svm-conf", type=float, default=1e-3, help="SVM tolerance.")
+    parser.add_argument("--crossval-k", type=int, default=10, help="Cross-validation folds.")
+    return parser.parse_args()
 
-    print("Evaluating on method {}".format(argv[1]))
 
-    feat_type = argv[1]
+def main() -> None:
+    args = parse_args()
+    if args.features.suffix != ".json":
+        raise ValueError(f"Expected json file, found {args.features}")
 
-    feat_name, ext = splitext(feat_type)
-    
-    assert ext == '.json', f'Expected json file, found {feat_type}'
+    scores = eval_svm(
+        args.features,
+        svm_iters=args.svm_iters,
+        svm_conf=args.svm_conf,
+        crossval_k=args.crossval_k,
+    )
+    mean_acc, std_acc = np.mean(scores), np.std(scores)
+    print(f"Evaluating on method {args.features}")
+    print(f"{args.features.stem:<16} : {mean_acc:4.4f} {std_acc:1.4f}")
 
-    score = eval_svm(feat_type, crossval_k=10)
-    mean_acc, std_acc = score.mean(), score.std()
 
-    print("{:<16} : {:4.4f} {:1.4f}".format(feat_name,mean_acc,std_acc))
-
+if __name__ == "__main__":
+    main()
