@@ -1,74 +1,91 @@
-import cv2
+from __future__ import annotations
+
+import argparse
 import json
+from pathlib import Path
+
+import cv2
 import torch
+from torchvision.models import ResNet18_Weights, ResNet50_Weights, resnet18, resnet50
 from tqdm import tqdm
-from os.path import join
-from os import readlink
+
 from utils import cv_centercrop
-from torchvision.models import resnet18, resnet50, ResNet18_Weights, ResNet50_Weights
-from sys import argv
 
-def resnet_feats(root, type=18):
 
-    if type == 18:    
+def _load_annots(root: Path) -> list[dict]:
+    with (root / "annots.json").open() as handle:
+        return json.load(handle)
+
+
+def _load_model(model_type: int) -> torch.nn.Module:
+    if model_type == 18:
         print("Extracting feats from pretrained ResNet18")
         model = resnet18(weights=ResNet18_Weights.DEFAULT)
-    elif type == 50:
+    elif model_type == 50:
         print("Extracting feats from pretrained ResNet50")
         model = resnet50(weights=ResNet50_Weights.DEFAULT)
     else:
-        raise RuntimeError(f"Model Resnet-{type} not recognized.")
+        raise RuntimeError(f"Model ResNet-{model_type} not recognized.")
 
-    # change last layer to identity to just get the feature vector
     model.fc = torch.nn.Identity()
     model.eval()
+    return model
 
-    with open(join(root, 'annots.json')) as f:
-        annots = json.load(f)
 
-    # statistics from Imagenet
-    # https://github.com/pytorch/examples/blob/97304e232807082c2e7b54c597615dc0ad8f6173/imagenet/main.py#L197-L198
+def resnet_feats(root: Path, model_type: int = 18) -> None:
+    model = _load_model(model_type)
+    annots = _load_annots(root)
+
     mean = torch.tensor([0.485, 0.456, 0.406])
     std = torch.tensor([0.229, 0.224, 0.225])
 
     new_annots = []
-    for i in tqdm(range(len(annots))):
-        path = annots[i]['path']
-        x,y,w,h = annots[i]['box']
+    for annot in tqdm(annots):
+        path = root / annot["path"]
+        x, y, w, h = annot["box"]
 
-        # read and convert to greyscale
-        img = cv2.imread(join(root,path))
-
+        img = cv2.imread(str(path))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-        # center crop
-        img = img[int(y):int(y+h), int(x):int(x+w)]
+        img = img[int(y) : int(y + h), int(x) : int(x + w)]
         img = cv_centercrop(img)
-        
-        # convert to tensor and normalize
-        img = torch.tensor(img.transpose(2,0,1),dtype=torch.float32) / 255.
-        img = (img - mean.view(3,1,1)) / std.view(3,1,1)
-        img = img.unsqueeze(0)
 
-        # forward to get feature
+        img_tensor = torch.tensor(img.transpose(2, 0, 1), dtype=torch.float32) / 255.0
+        img_tensor = (img_tensor - mean.view(3, 1, 1)) / std.view(3, 1, 1)
+        img_tensor = img_tensor.unsqueeze(0)
+
         with torch.no_grad():
-            res = model(img)
+            res = model(img_tensor)
 
-        new_annots.append({
-            'id': '{:06d}'.format(annots[i]['id']),
-            'feat' : res.squeeze(0).numpy().tolist(),
-            'label': annots[i]['label']
-        })
+        new_annots.append(
+            {
+                "id": f"{annot['id']:06d}",
+                "feat": res.squeeze(0).numpy().tolist(),
+                "label": annot["label"],
+            }
+        )
 
-        break
-
-    with open(f'resnet{type}_center.json', 'w') as f:
-        json.dump(new_annots, f)
+    with Path(f"resnet{model_type}_center.json").open("w") as handle:
+        json.dump(new_annots, handle)
 
 
-if __name__ == '__main__':
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Compute ResNet features.")
+    parser.add_argument("model", type=int, choices=[18, 50], help="ResNet model size.")
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path("data_dlc"),
+        help="Path to the DLC2021 dataset root or a symlink named data_dlc.",
+    )
+    return parser.parse_args()
 
-    resnet_type = argv[1]
-    root = readlink('data_dlc')
-    print('Computing Resnet features with center crop')
-    resnet_feats(root, type=int(resnet_type))
+
+def main() -> None:
+    args = parse_args()
+    root = args.root.resolve() if args.root.is_symlink() else args.root
+    print("Computing ResNet features with center crop")
+    resnet_feats(root, model_type=args.model)
+
+
+if __name__ == "__main__":
+    main()
